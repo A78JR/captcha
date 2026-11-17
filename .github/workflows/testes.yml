@@ -1,0 +1,45 @@
+# Testes do Captcha (captcha.lingoist.com.br), o captcha de encaixe usado por todos os sites do Lingoist.
+#
+# Este repositório é público e não guarda segredo nenhum. Os testes rodam nos PRs. A publicação no servidor é
+# feita pelo workflow "Captcha" do repositório A78JR/projetos (.github/workflows/captcha.yml), que já tem os
+# segredos do FTP: ele baixa este código (main, ou a branch escolhida) e envia para /projetos/captcha.
+
+name: Testes
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: captcha-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  testes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # MySQL para os testes de login, segurança, painel e da API do captcha (tests/Apoio/TesteComBanco.php).
+    # Usa o MySQL que já vem instalado no runner (liga em segundos); o contêiner mysql:8.0 levava ~30 s para subir.
+    env:
+      CAPTCHA_TESTE_HOST: 127.0.0.1
+      CAPTCHA_TESTE_BANCO: captcha_teste
+      CAPTCHA_TESTE_USUARIO: captcha
+      CAPTCHA_TESTE_SENHA: captcha
+    steps:
+      - uses: actions/checkout@v5
+      - name: MySQL do runner
+        run: |
+          sudo systemctl start mysql.service
+          mysql -h 127.0.0.1 -uroot -proot -e "CREATE DATABASE captcha_teste; CREATE USER 'captcha'@'%' IDENTIFIED BY 'captcha'; GRANT ALL ON captcha_teste.* TO 'captcha'@'%';"
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: pdo, pdo_mysql, gd, sodium
+          coverage: none
+      - name: Sintaxe do PHP
+        run: find src public views tests -name '*.php' -print0 | xargs -0 -n1 php -l > /dev/null && node -e "new Function(require('fs').readFileSync('public/captcha.js','utf8'))"
+      - run: composer install --no-interaction --no-progress
+      - run: vendor/bin/phpunit

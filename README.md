@@ -67,8 +67,8 @@ Desafios com mais de 90 dias são apagados a cada publicação. Mudança = arqui
 ## Servidor (cPanel)
 
 1. Subdomínio `captcha.lingoist.com.br` com raiz em `/projetos/captcha/public`.
-2. Segredos do repositório: `PROJETOS_FTP_HOST`, `PROJETOS_FTP_USER`, `PROJETOS_FTP_PASS` (os mesmos de projetos).
-   `CAPTCHA_MIGRAR_TOKEN` é opcional.
+2. A publicação é o workflow "Captcha" do repositório (privado) A78JR/projetos, que já tem os segredos do FTP:
+   baixa este código e envia para `/projetos/captcha`. Este repositório só roda os testes, nos PRs.
 3. A primeira publicação cria `/projetos/captcha/config/config.local.php` com o banco da Genealogia.
 
 ## Rodar localmente
