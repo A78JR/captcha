@@ -1,0 +1,5 @@
+/vendor/
+/config/config.local.php
+/.phpunit.cache/
+/temp/
+__pycache__/
