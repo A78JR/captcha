@@ -1,0 +1,36 @@
+{
+    "name": "a78jr/captcha",
+    "description": "Captcha de encaixe (cozinha e brinquedos) para os sites do Lingoist, em PHP OOP + MySQL",
+    "type": "project",
+    "license": "proprietary",
+    "require": {
+        "php": ">=8.2",
+        "ext-pdo": "*",
+        "ext-curl": "*",
+        "ext-json": "*",
+        "ext-gd": "*",
+        "ext-sodium": "*"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^11.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Captcha\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Captcha\\Testes\\": "tests/"
+        }
+    },
+    "scripts": {
+        "test": "phpunit"
+    },
+    "config": {
+        "sort-packages": true,
+        "platform": {
+            "php": "8.2.0"
+        }
+    }
+}

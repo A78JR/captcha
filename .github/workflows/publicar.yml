@@ -1,0 +1,244 @@
+# Publica o Captcha (captcha.lingoist.com.br), o captcha de encaixe usado por todos os sites do Lingoist.
+#
+# Roda a cada push na main e pelo botão "Run workflow". Os testes rodam só no PR (a main recebe código já
+# testado); na publicação, instala as dependências sem as de desenvolvimento e envia o repositório para a
+# subpasta captcha/ da conta FTP dos projetos (no cPanel: pasta inicial /projetos, com a raiz do subdomínio
+# em /projetos/captcha/public).
+#
+# Segredos do repositório (Settings > Secrets and variables > Actions):
+#   PROJETOS_FTP_HOST, PROJETOS_FTP_USER, PROJETOS_FTP_PASS
+#                            os mesmos do repositório projetos: conta FTP cuja pasta inicial é /projetos.
+#   CAPTCHA_MIGRAR_TOKEN     (opcional) o mesmo 'migrar_token' do config.local.php do servidor. Sem ele, o deploy
+#                            usa um token tirado do segredo do FTP (o mesmo a cada publicação).
+#
+# config/config.local.php do servidor: se ainda não existe, o deploy cria um, com o banco e o e-mail da Genealogia
+# (o mesmo banco burgucom_projetos), uma chave_app nova e o token de migração. Depois disso o arquivo nunca é tocado.
+# O que nunca sobe: config/config.local.php e tests/. Só sobem os arquivos que mudaram (sha1 comparado com
+# captcha/.publicado.txt do servidor); nada é apagado no servidor.
+
+name: Publicar captcha
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: captcha-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  testes:
+    # Só no PR: na main o código já chegou testado pelo PR, então a publicação não repete os testes.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # MySQL para os testes de login, segurança, painel e da API do captcha (tests/Apoio/TesteComBanco.php).
+    # Usa o MySQL que já vem instalado no runner (liga em segundos); o contêiner mysql:8.0 levava ~30 s para subir.
+    env:
+      CAPTCHA_TESTE_HOST: 127.0.0.1
+      CAPTCHA_TESTE_BANCO: captcha_teste
+      CAPTCHA_TESTE_USUARIO: captcha
+      CAPTCHA_TESTE_SENHA: captcha
+    steps:
+      - uses: actions/checkout@v5
+      - name: MySQL do runner
+        run: |
+          sudo systemctl start mysql.service
+          mysql -h 127.0.0.1 -uroot -proot -e "CREATE DATABASE captcha_teste; CREATE USER 'captcha'@'%' IDENTIFIED BY 'captcha'; GRANT ALL ON captcha_teste.* TO 'captcha'@'%';"
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: pdo, pdo_mysql, gd, sodium
+          coverage: none
+      - name: Sintaxe do PHP
+        run: find src public views tests -name '*.php' -print0 | xargs -0 -n1 php -l > /dev/null && node -e "new Function(require('fs').readFileSync('public/captcha.js','utf8'))"
+      - run: composer install --no-interaction --no-progress
+      - run: vendor/bin/phpunit
+
+  publicar:
+    needs: testes
+    # Roda mesmo com os testes pulados (push na main / botão); para se os testes falharem.
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.testes.result != 'failure' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          coverage: none
+      - name: Dependências de produção
+        run: composer install --no-dev --optimize-autoloader --no-interaction --no-progress
+      - name: Instalar lftp
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq lftp
+      - name: Espelhar por FTP
+        env:
+          FTP_HOST: ${{ secrets.PROJETOS_FTP_HOST }}
+          FTP_USER: ${{ secrets.PROJETOS_FTP_USER }}
+          FTP_PASS: ${{ secrets.PROJETOS_FTP_PASS }}
+          CAPTCHA_MIGRAR_TOKEN: ${{ secrets.CAPTCHA_MIGRAR_TOKEN }}
+        run: |
+          if [ -z "$FTP_HOST" ] || [ -z "$FTP_USER" ] || [ -z "$FTP_PASS" ]; then
+            echo "::error::Faltam os segredos PROJETOS_FTP_HOST, PROJETOS_FTP_USER e PROJETOS_FTP_PASS no repositório."; exit 1
+          fi
+          # Como no burgu: o certificado FTPS da hospedagem costuma ser do nome
+          # do SERVIDOR, não de ftp.<domínio>. Se o nome do certificado aponta
+          # para o mesmo IP, conecta por ele, com a verificação TLS completa.
+          CN=""
+          for t in 1 2 3; do
+            CN=$(timeout 20 openssl s_client -starttls ftp -connect "$FTP_HOST:21" </dev/null 2>/dev/null \
+                   | openssl x509 -noout -subject -nameopt multiline 2>/dev/null \
+                   | awk -F' = ' '/commonName/ {print $2; exit}')
+            [ -n "$CN" ] && break
+            echo "Certificado FTPS não lido (tentativa $t de 3); nova tentativa em 30 s"; sleep 30
+          done
+          [ -n "$CN" ] || { echo "::error::O servidor FTP não respondeu. Rode o Publicar de novo mais tarde."; exit 1; }
+          IP_FTP=$(getent ahostsv4 "$FTP_HOST" | awk 'NR==1 {print $1}')
+          IP_CN=$(getent ahostsv4 "$CN" | awk 'NR==1 {print $1}' || true)
+          HOST="$FTP_HOST"
+          if [ "${CN#\*}" = "$CN" ] && [ -n "$IP_CN" ] && [ "$IP_CN" = "$IP_FTP" ]; then
+            HOST="$CN"; echo "Conectando pelo nome do certificado: $CN"
+          elif [ "$IP_CN" != "$IP_FTP" ]; then
+            echo "::error::O certificado FTPS é de '$CN', que não aponta para o mesmo servidor. Use em FTP_HOST o nome do certificado."; exit 1
+          fi
+          # Só sobe o que mudou de verdade: o servidor guarda em captcha/.publicado.txt o sha1 de cada arquivo da última
+          # publicação, e só os arquivos com sha1 diferente (ou novos) sobem. Antes, o mirror reenviava TODOS os
+          # arquivos a cada publicação (o checkout do git sempre tem data nova), e cada troca de arquivo abria uma
+          # janela em que o PHP podia não achar a classe (erro "AdminUsuarios not found" de 2026-11-15).
+          # Cada arquivo sobe com nome temporário (.subindo) e depois troca de nome por cima do antigo.
+          # Ordem: o código (src, views, db...), depois vendor/ (o autoload que aponta para classes novas) e por
+          # último public/ (a porta de entrada).
+          find . -type f ! -path './.git/*' ! -path './.github/*' ! -path './tests/*' ! -path './.phpunit.cache/*' ! -name phpunit.xml \
+            ! -path './config/config.local.php' ! -name '*.py' ! -path '*/__pycache__/*' ! -name .gitignore \
+            ! -name README.md ! -name '*.subindo' ! -name lista.txt ! -name anterior.txt ! -name publicado.txt \
+            ! -name subir.lftp -printf '%P\n' | LC_ALL=C sort | xargs -d '\n' sha1sum > publicado.txt
+          lftp -u "$FTP_USER","$FTP_PASS" "$HOST" > /dev/null 2>&1 <<FIM || true
+          set ftp:ssl-force true
+          set ftp:ssl-protect-data true
+          set net:max-retries 3
+          set net:timeout 30
+          get captcha/.publicado.txt -o anterior.txt
+          bye
+          FIM
+          touch anterior.txt
+          LC_ALL=C sort anterior.txt -o anterior.txt
+          LC_ALL=C comm -23 <(LC_ALL=C sort publicado.txt) anterior.txt | sed 's/^[0-9a-f]*  //' > mudaram.txt
+          { grep -v -E '^(vendor|public)/' mudaram.txt || true; grep -E '^vendor/' mudaram.txt || true; grep -E '^public/' mudaram.txt || true; } > ordem.txt
+          echo "Arquivos que mudaram: $(wc -l < ordem.txt) de $(wc -l < publicado.txt)"
+          cat ordem.txt
+          {
+            echo "set ftp:ssl-force true"
+            echo "set ftp:ssl-protect-data true"
+            echo "set net:max-retries 3"
+            echo "set net:timeout 30"
+            echo "set cmd:fail-exit true"
+            sed 's|/[^/]*$||;t;d' ordem.txt | LC_ALL=C sort -u | sed 's|^|mkdir -p -f captcha/|'
+            while IFS= read -r f; do
+              echo "put \"$f\" -o \"captcha/$f.subindo\""
+              echo "mv \"captcha/$f.subindo\" \"captcha/$f\""
+            done < ordem.txt
+            echo "put publicado.txt -o captcha/.publicado.txt"
+            echo "bye"
+          } > subir.lftp
+          lftp -u "$FTP_USER","$FTP_PASS" "$HOST" < subir.lftp
+
+          # config/config.local.php: o servidor tem o seu e o deploy não mexe nele. Se ainda não existe (primeira
+          # publicação), é criado com o banco e o e-mail da Genealogia, uma chave_app nova e o token de migração.
+          DERIVADO=$(printf 'captcha-migrar:%s' "$FTP_PASS" | sha256sum | cut -c1-64)
+          echo "::add-mask::$DERIVADO"
+          TOKEN="${CAPTCHA_MIGRAR_TOKEN:-$DERIVADO}"
+          lftp -u "$FTP_USER","$FTP_PASS" "$HOST" > lista.txt 2>/dev/null <<FIM || true
+          set ftp:ssl-force true
+          set ftp:ssl-protect-data true
+          set net:max-retries 3
+          set net:timeout 30
+          cls -1 captcha/
+          cls -1 captcha/config/
+          bye
+          FIM
+          grep -q 'captcha/public' lista.txt || { echo "::error::Não consegui listar a pasta captcha no FTP."; exit 1; }
+          if grep -q 'config.local.php' lista.txt; then
+            echo "config/config.local.php já existe no servidor: fica como está."
+          else
+            echo "Sem config/config.local.php no servidor: criando a partir da Genealogia."
+            pasta=$(mktemp -d)
+            lftp -u "$FTP_USER","$FTP_PASS" "$HOST" > /dev/null 2>&1 <<FIM || true
+          set ftp:ssl-force true
+          set ftp:ssl-protect-data true
+          set net:max-retries 3
+          set net:timeout 30
+          get genealogia/config/config.local.php -o $pasta/genealogia.php
+          bye
+          FIM
+            [ -s "$pasta/genealogia.php" ] || { echo "::error::Não achei genealogia/config/config.local.php no FTP para copiar o banco."; exit 1; }
+            TOKEN="$TOKEN" php -r '
+              $e = require $argv[1];
+              if (!is_array($e) || !is_array($e["banco"] ?? null) || ($e["banco"]["senha"] ?? "") === "") {
+                  fwrite(STDERR, "config da Genealogia sem banco" . PHP_EOL);
+                  exit(1);
+              }
+              $c = [
+                  "fuso" => "America/Sao_Paulo",
+                  "depurar" => false,
+                  "banco" => $e["banco"],
+                  "migrar_token" => getenv("TOKEN"),
+                  "url" => "https://captcha.lingoist.com.br",
+                  "chave_app" => bin2hex(random_bytes(32)),
+                  "email_remetente" => $e["email_remetente"] ?? "nao-responda@lingoist.com.br",
+                  "email_de_verdade" => $e["email_de_verdade"] ?? true,
+                  "webmasters" => $e["webmasters"] ?? [],
+                  "duas_etapas" => $e["duas_etapas"] ?? true,
+              ];
+              $texto = "<?php\n\n// Criado pelo deploy (.github/workflows/publicar.yml) com o banco e o e-mail da Genealogia.\n"
+                  . "// Pode ser editado à mão: o deploy nunca mais mexe neste arquivo.\n\nreturn " . var_export($c, true) . ";\n";
+              file_put_contents($argv[2], $texto);
+            ' "$pasta/genealogia.php" "$pasta/config.local.php" || { rm -rf "$pasta"; echo "::error::Não consegui montar o config do Captcha."; exit 1; }
+            lftp -u "$FTP_USER","$FTP_PASS" "$HOST" > /dev/null 2>&1 <<FIM
+          set ftp:ssl-force true
+          set ftp:ssl-protect-data true
+          set net:max-retries 3
+          set net:timeout 30
+          put $pasta/config.local.php -o captcha/config/config.local.php
+          chmod 600 captcha/config/config.local.php
+          bye
+          FIM
+            rm -rf "$pasta"
+            echo "config/config.local.php criado no servidor."
+          fi
+      - name: Migrar o banco
+        env:
+          CAPTCHA_MIGRAR_TOKEN: ${{ secrets.CAPTCHA_MIGRAR_TOKEN }}
+          FTP_PASS: ${{ secrets.PROJETOS_FTP_PASS }}
+        run: |
+          # O token do segredo, se existir; senão (ou se o servidor recusar) o tirado do segredo do FTP.
+          DERIVADO=$(printf 'captcha-migrar:%s' "$FTP_PASS" | sha256sum | cut -c1-64)
+          echo "::add-mask::$DERIVADO"
+          codigo=0
+          for token in "$CAPTCHA_MIGRAR_TOKEN" "$DERIVADO"; do
+            [ -n "$token" ] || continue
+            codigo=$(curl -sS -o resposta.json -w '%{http_code}' --max-time 600 -X POST -H "X-Captcha-Token: $token" https://captcha.lingoist.com.br/sistema/migrar)
+            [ "$codigo" = 401 ] || break
+          done
+          cat resposta.json; echo
+          [ "$codigo" = 200 ] || { echo "::error::/sistema/migrar respondeu $codigo"; exit 1; }
+      - name: Conferir o site
+        run: |
+          # ?agora=: endereço novo a cada vez, para não ler uma cópia guardada pelo nginx da hospedagem.
+          curl -fsS "https://captcha.lingoist.com.br/sistema/saude?agora=$(date +%s)"; echo
+          curl -fsS -o /dev/null https://captcha.lingoist.com.br/
+          curl -fsS -o /dev/null https://captcha.lingoist.com.br/demo
+          curl -fsS "https://captcha.lingoist.com.br/api/chave?agora=$(date +%s)" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['algoritmo']=='ed25519' and len(d['chave'])==44, d"
+          curl -fsS -o /dev/null https://captcha.lingoist.com.br/captcha.js
+          curl -fsS -o /dev/null https://captcha.lingoist.com.br/captcha.css
+          # Um desafio de verdade, pedido como a demonstração pede, e a imagem da cena.
+          d=$(curl -fsS -X POST -H 'Origin: https://captcha.lingoist.com.br' -d site=demo -d nonce=conferencia-do-deploy-0001 https://captcha.lingoist.com.br/api/desafio)
+          a=$(printf '%s' "$d" | python3 -c "import json,sys; print(json.load(sys.stdin)['a'])")
+          curl -fsS -o cena.png "$a" && file cena.png | grep -q PNG || { echo "::error::a imagem da cena não saiu"; exit 1; }
+          codigo=$(curl -sS -o /dev/null -w '%{http_code}' https://captcha.lingoist.com.br/painel/captcha)
+          echo "/painel/captcha sem login: $codigo"
+          [ "$codigo" != 200 ] || { echo "::error::/painel/captcha respondeu 200 sem login"; exit 1; }
