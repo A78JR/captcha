@@ -13,6 +13,7 @@ use Captcha\Nucleo\Requisicao;
 use Captcha\Nucleo\Resposta;
 use Captcha\Nucleo\Roteador;
 use Captcha\Nucleo\Servicos;
+use Captcha\Seguranca\TokenErrado;
 
 /** Rotas de manutenção: saúde do site e migrações do banco (chamadas pelo deploy). */
 final class SistemaControlador
@@ -33,13 +34,18 @@ final class SistemaControlador
 
     public function saude(): Resposta
     {
-        return Resposta::json(['ok' => true, 'php' => PHP_VERSION, 'hora' => date('c')]);
+        return Resposta::json(['ok' => true, 'hora' => date('c')]);
     }
 
     public function migrar(Requisicao $requisicao): Resposta
     {
+        $freio = new TokenErrado($this->servicos);
+        if ($freio->esgotado($requisicao)) {
+            return Resposta::json(['ok' => false, 'erro' => 'muitas tentativas'], 429);
+        }
         $token = (string) $this->config->obter('migrar_token', '');
         if ($token === '' || !hash_equals($token, $requisicao->cabecalho('x-captcha-token'))) {
+            $freio->contar($requisicao);
             return Resposta::json(['ok' => false, 'erro' => 'não autorizado'], 401);
         }
         $aplicadas = (new Migrador($this->conexao->pdo(), $this->pastaMigracoes))->migrar();
