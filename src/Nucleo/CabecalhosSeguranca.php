@@ -16,10 +16,12 @@ final class CabecalhosSeguranca
         $cabecalhos = [
             'X-Content-Type-Options' => 'nosniff',
             'X-Frame-Options' => 'DENY',
+            'Cross-Origin-Opener-Policy' => 'same-origin',
             'Referrer-Policy' => 'strict-origin-when-cross-origin',
             'Permissions-Policy' => 'camera=(), microphone=(), geolocation=()',
             'Content-Security-Policy' => implode('; ', [
                 "default-src 'self'",
+                "object-src 'none'",
                 "script-src 'self'",
                 "style-src 'self'",
                 "img-src 'self' data:",
