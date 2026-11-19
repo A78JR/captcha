@@ -181,12 +181,19 @@
     if (this.ocupado || this.feito || !this.d) return;
     e.preventDefault();
     var self = this, x0 = e.clientX, y0 = e.clientY, t0 = performance.now(), moveu = false, trajeto = [];
+    // No dedo (ou caneta), o objeto anda um pouco ACIMA do ponto de toque, para a inclinação não ficar escondida
+    // debaixo do dedo. Vale onde o objeto aparece e onde ele é solto: solta onde se vê.
+    var acima = 0;
     this.pegar();
     var mv = function (ev) {
       if (!moveu && Math.hypot(ev.clientX - x0, ev.clientY - y0) < 6) return;
-      if (!moveu) { moveu = true; self.criarMao(); }
-      self.moverMao(ev.clientX, ev.clientY);
-      var p = self.naCena(ev.clientX, ev.clientY);
+      if (!moveu) {
+        moveu = true;
+        self.criarMao();
+        if (e.pointerType === 'touch' || e.pointerType === 'pen') acima = self.mao.offsetHeight * 0.45 + 24;
+      }
+      self.moverMao(ev.clientX, ev.clientY - acima);
+      var p = self.naCena(ev.clientX, ev.clientY - acima);
       trajeto.push([Math.round(performance.now() - t0), Math.round(p[0] * 10) / 10, Math.round(p[1] * 10) / 10]);
       if (trajeto.length > 390) trajeto.splice(1, 1);
     };
@@ -204,7 +211,7 @@
         addEventListener('pointermove', self.movendo);
         return;
       }
-      var p = self.naCena(ev.clientX, ev.clientY);
+      var p = self.naCena(ev.clientX, ev.clientY - acima);
       self.largar(p[0], p[1], 'arrastar', trajeto);
     };
     addEventListener('pointermove', mv);
